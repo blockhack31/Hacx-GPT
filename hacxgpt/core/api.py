@@ -653,12 +653,22 @@ class HTTPTransport:
         else:
             self._ssl_context = ssl.create_default_context()
 
-    def _decompress_response(self, response: Any) -> Any:
+    def _decompress_response(self, response: Any, stream: bool = False) -> Any:
         """Decompress response if Content-Encoding is gzip or deflate."""
         encoding = response.info().get("Content-Encoding")
+        if not encoding:
+            return response
+            
         if encoding == "gzip":
+            if stream:
+                # Wrap the stream in GzipFile but don't read() yet
+                return gzip.GzipFile(fileobj=response)
             return gzip.GzipFile(fileobj=io.BytesIO(response.read()))
         elif encoding == "deflate":
+            if stream:
+                # Deflate is harder to stream with urllib, we'll try raw decompressor
+                # but for now most use gzip
+                return response 
             return io.BytesIO(zlib.decompress(response.read()))
         return response
 
@@ -743,7 +753,7 @@ class HTTPTransport:
                     )
 
                 response = opener.open(req, timeout=self.timeout)
-                response = self._decompress_response(response)
+                response = self._decompress_response(response, stream=stream)
 
                 if stream:
                     return self._stream_response(response)
@@ -798,23 +808,15 @@ class HTTPTransport:
 
     def _stream_response(self, response) -> Iterator[str]:
         """Read SSE stream line by line."""
-        buffer = ""
-        while True:
-            # Read in small chunks for responsiveness
-            chunk = response.read(1)
-            if not chunk:
-                if buffer.strip():
-                    yield buffer
-                break
-            
+        for line in response:
+            if not line:
+                continue
             try:
-                char = chunk.decode("utf-8", errors="replace")
-                buffer += char
-                if char == "\n":
-                    line = buffer.strip()
-                    if line:
-                        yield line
-                    buffer = ""
+                # Decoded line by line
+                if isinstance(line, bytes):
+                    yield line.decode("utf-8", errors="replace").strip()
+                else:
+                    yield line.strip()
             except Exception:
                 continue
 
